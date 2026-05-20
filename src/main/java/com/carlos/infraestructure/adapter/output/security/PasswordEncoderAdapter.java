@@ -1,6 +1,6 @@
 package com.carlos.infraestructure.adapter.output.security;
 
-import com.carlos.domain.port.output.PasswordCheckerPort;
+import com.carlos.domain.ports.output.PasswordCheckPort;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
