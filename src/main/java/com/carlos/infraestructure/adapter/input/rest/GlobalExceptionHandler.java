@@ -1,145 +1,210 @@
 package com.carlos.infraestructure.adapter.input.rest;
 
-import com.carlos.application.dto.LoginRequest;
-import com.carlos.application.dto.LoginResponse;
-import com.carlos.domain.ports.input.LoginPort;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
-import lombok.RequiredArgsConstructor;
+import com.carlos.domain.exception.AuthException;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * Adaptador IN REST para autenticación.
+ * Manejador global de excepciones HTTP.
  *
- * Primera clase del proyecto que recibe el mundo exterior.
- * Responsabilidades exactas, ni una más ni una menos:
- *   1. Recibir la petición HTTP y deserializar el JSON.
- *   2. Validar el formato de los datos de entrada (@Valid).
- *   3. Convertir el request de infraestructura al DTO de aplicación.
- *   4. Delegar al puerto de entrada LoginPort.
- *   5. Serializar la respuesta y retornar el código HTTP correcto.
+ * Intercepta excepciones antes de que lleguen al cliente y las
+ * convierte en respuestas HTTP semánticas, seguras y consistentes.
  *
- * NO valida reglas de negocio → eso es LoginUseCase.
- * NO consulta la base de datos → eso es UserPersistenceAdapter.
- * NO genera tokens JWT → eso es JwtAdapter.
- * NO verifica contraseñas → eso es PasswordEncoderAdapter.
+ * ¿Por qué está en infrastructure y no en el dominio?
+ *   Porque traduce excepciones a HTTP, que es responsabilidad
+ *   de la capa web (infraestructura). El dominio lanza AuthException
+ *   sin saber que HTTP existe. Este handler hace esa traducción.
  *
- * @RestController: combina @Controller + @ResponseBody.
- *   Todos los métodos serializan automáticamente el objeto
- *   retornado a JSON usando Jackson. Sin esta anotación,
- *   Spring intentaría resolver una vista (Thymeleaf, JSP).
+ *   Separación de responsabilidades:
+ *     Dominio        → lanza AuthException (lenguaje del negocio)
+ *     Este handler   → traduce a HTTP 401  (lenguaje de la web)
  *
- * @RequestMapping("/api/auth"): prefijo base de todos los
- *   endpoints de este controlador. Todos los métodos heredan
- *   este prefijo: /api/auth/login, /api/auth/refresh, etc.
+ * @RestControllerAdvice: combina @ControllerAdvice + @ResponseBody.
+ *   @ControllerAdvice: aplica a todos los @RestController del proyecto.
+ *   @ResponseBody: serializa automáticamente el Map retornado a JSON.
+ *   Sin @ResponseBody, Spring intentaría resolver una vista, no JSON.
  *
- * @RequiredArgsConstructor: Lombok genera el constructor con
- *   loginPort final. Spring inyecta LoginUseCase (registrado
- *   en BeanConfig como LoginPort) sin que el controlador
- *   sepa que LoginUseCase existe.
+ * ¿Cómo decide Spring qué @ExceptionHandler llamar?
+ *   Spring busca el handler más específico primero.
+ *   Si lanza AuthException → busca @ExceptionHandler(AuthException.class)
+ *   Si no encuentra uno específico → busca @ExceptionHandler(Exception.class)
+ *   Siempre usa el handler más específico disponible.
  *
- * ¿Por qué usar un record interno LoginRequestBody en lugar
- * de LoginRequest directamente con @NotBlank?
- *   LoginRequest (application/dto) es Java puro sin anotaciones
- *   de Jakarta. Para mantener esa pureza, definimos un record
- *   interno en infraestructura que SÍ tiene las anotaciones de
- *   validación. El controlador recibe el record, lo valida,
- *   y construye el LoginRequest limpio para pasar al dominio.
- *   Así cada capa tiene exactamente lo que necesita.
+ * Jerarquía de handlers en este archivo (de más específico a más general):
+ *   AuthException                    → 401 Unauthorized
+ *   MethodArgumentNotValidException  → 400 Bad Request
+ *   Exception                        → 500 Internal Server Error
  */
-@RestController
-@RequestMapping("/api/auth")
-@RequiredArgsConstructor
-public class AuthController {
+@RestControllerAdvice
+public class GlobalExceptionHandler {
 
     /**
-     * Dependencia hacia la interfaz del dominio.
-     * Nunca hacia LoginUseCase directamente.
-     * BeanConfig inyecta la implementación concreta.
+     * Maneja AuthException lanzada por LoginUseCase.
+     *
+     * HTTP 401 Unauthorized: las credenciales proporcionadas
+     * no son válidas o no tienen permisos suficientes.
+     *
+     * ¿Por qué 401 y no 403?
+     *   401 Unauthorized: el cliente NO está autenticado.
+     *     "No sé quién eres, identifícate correctamente."
+     *   403 Forbidden: el cliente SÍ está autenticado pero
+     *     no tiene permisos para el recurso solicitado.
+     *     "Sé quién eres, pero no puedes hacer esto."
+     *   En un login fallido, el usuario no está autenticado → 401.
+     *
+     * El mensaje de AuthException es intencionalmente genérico
+     * ("Credenciales inválidas") para prevenir user enumeration:
+     * el atacante no puede distinguir si el username existe
+     * o si fue la contraseña la que falló.
+     *
+     * @param ex AuthException lanzada por LoginUseCase.
+     * @return ResponseEntity con HTTP 401 y body JSON estructurado.
      */
-    private final LoginPort loginPort;
-
-    /**
-     * POST /api/auth/login
-     *
-     * Endpoint público: configurado en SecurityConfig con .permitAll().
-     * El usuario no tiene token aún en este punto, es donde lo obtiene.
-     *
-     * Flujo:
-     *   1. Jackson deserializa el JSON a LoginRequestBody.
-     *   2. @Valid activa Bean Validation sobre LoginRequestBody.
-     *      Si @NotBlank falla → MethodArgumentNotValidException
-     *      → GlobalExceptionHandler retorna HTTP 400.
-     *   3. Se construye LoginRequest (DTO de aplicación, puro).
-     *   4. loginPort.login() invoca LoginUseCase.
-     *      Si credenciales inválidas → AuthException
-     *      → GlobalExceptionHandler retorna HTTP 401.
-     *   5. ResponseEntity.ok() retorna HTTP 200 con el token.
-     *
-     * ResponseEntity<LoginResponse>: permite controlar explícitamente
-     *   el código HTTP. .ok() retorna 200 OK con el body serializado.
-     *   Alternativas: .created(), .noContent(), .badRequest(), etc.
-     *
-     * @Valid: activa Bean Validation sobre el parámetro anotado.
-     *   Si alguna constraint falla, Spring lanza
-     *   MethodArgumentNotValidException antes de entrar al método.
-     *   GlobalExceptionHandler la captura y retorna HTTP 400.
-     *
-     * @RequestBody: indica a Jackson que deserialice el body HTTP
-     *   al tipo del parámetro. Sin esta anotación, Spring buscaría
-     *   los valores en los parámetros de la URL (query params).
-     */
-    @PostMapping("/login")
-    public ResponseEntity<LoginResponse> login(
-            @Valid @RequestBody LoginRequestBody requestBody) {
-
-        // Construir el DTO de aplicación (puro, sin anotaciones Jakarta)
-        // a partir del record de infraestructura ya validado.
-        LoginRequest request = new LoginRequest(
-                requestBody.username(),
-                requestBody.password()
-        );
-
-        LoginResponse response = loginPort.login(request);
-        return ResponseEntity.ok(response);
+    @ExceptionHandler(AuthException.class)
+    public ResponseEntity<Map<String, Object>> handleAuthException(
+            AuthException ex) {
+        return buildResponse(HttpStatus.UNAUTHORIZED, ex.getMessage());
     }
 
     /**
-     * Record interno de validación de infraestructura.
+     * Maneja errores de validación de Bean Validation (@Valid).
      *
-     * ¿Por qué un record interno y no una clase separada?
-     *   Porque este record es un detalle de implementación del
-     *   controlador REST. Solo este controlador lo usa para
-     *   validar el formato de entrada HTTP. No tiene sentido
-     *   crear un archivo separado para algo tan acotado.
+     * Se dispara cuando @NotBlank, @Email, @Size, etc. fallan
+     * en el record LoginRequestBody del controlador.
      *
-     * ¿Por qué un record y no una clase normal?
-     *   Los records de Java (desde Java 16) son inmutables por
-     *   defecto, tienen constructor, getters y equals/hashCode
-     *   generados automáticamente. Son perfectos para DTOs
-     *   de validación en infraestructura donde sí podemos
-     *   usar anotaciones de Jakarta.
+     * HTTP 400 Bad Request: la petición tiene formato incorrecto.
      *
-     * ¿Por qué @NotBlank aquí y no en LoginRequest (application/dto)?
-     *   LoginRequest es Java puro sin dependencias externas.
-     *   @NotBlank es de jakarta.validation (infraestructura).
-     *   Al separar la validación de formato en este record de
-     *   infraestructura, mantenemos LoginRequest limpio.
-     *   Cada capa tiene exactamente las dependencias que necesita.
+     * MethodArgumentNotValidException contiene todos los errores
+     * de validación en una sola excepción. Un request puede fallar
+     * múltiples validaciones simultáneamente (username Y password
+     * vacíos). Retornamos todos los errores de una vez para que
+     * el cliente pueda mostrarlos todos al usuario sin hacer
+     * múltiples intentos.
      *
-     * Jackson deserializa records correctamente en Spring Boot 3.x:
-     *   {"username":"admin","password":"password123"}
-     *   → new LoginRequestBody("admin", "password123")
+     * Estructura de la respuesta para validación:
+     * {
+     *   "timestamp": "2024-01-15T10:30:00",
+     *   "status": 400,
+     *   "error": {
+     *     "username": "El username es obligatorio",
+     *     "password": "La contraseña es obligatoria"
+     *   }
+     * }
+     *
+     * ¿Por qué un Map<String, String> para los errores de campo?
+     *   Porque el cliente (frontend) necesita saber QUÉ campo
+     *   falló para mostrar el error debajo del input correcto.
+     *   Un mensaje genérico "hay errores de validación" no ayuda
+     *   a la UX. Campo → mensaje hace la respuesta accionable.
+     *
+     * @param ex MethodArgumentNotValidException con todos los errores.
+     * @return ResponseEntity con HTTP 400 y mapa campo → mensaje.
      */
-    record LoginRequestBody(
-            @NotBlank(message = "El username es obligatorio")
-            String username,
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<Map<String, Object>> handleValidationErrors(
+            MethodArgumentNotValidException ex) {
 
-            @NotBlank(message = "La contraseña es obligatoria")
-            String password
-    ) {}
+        Map<String, String> fieldErrors = new HashMap<>();
+
+        /*
+         * getAllErrors() retorna todos los errores de validación.
+         * Cada error puede ser:
+         *   FieldError:   error en un campo específico (@NotBlank en "username")
+         *   ObjectError:  error a nivel de objeto completo (@Valid en clase)
+         *
+         * Casteamos a FieldError para obtener el nombre del campo.
+         * getDefaultMessage() retorna el mensaje definido en la anotación:
+         *   @NotBlank(message = "El username es obligatorio")
+         *   → "El username es obligatorio"
+         */
+        ex.getBindingResult().getAllErrors().forEach(error -> {
+            String fieldName = ((FieldError) error).getField();
+            String message = error.getDefaultMessage();
+            fieldErrors.put(fieldName, message);
+        });
+
+        return buildResponse(HttpStatus.BAD_REQUEST, fieldErrors);
+    }
+
+    /**
+     * Catch-all para cualquier excepción no manejada explícitamente.
+     *
+     * HTTP 500 Internal Server Error: algo inesperado ocurrió.
+     *
+     * ¿Por qué no exponer ex.getMessage() en producción?
+     *   El mensaje de una excepción genérica puede contener:
+     *   - Rutas de archivos del servidor
+     *   - Nombres de tablas de la base de datos
+     *   - Detalles de la estructura interna del sistema
+     *   Todo eso es información valiosa para un atacante.
+     *
+     *   En desarrollo (donde estamos ahora) exponer el mensaje
+     *   facilita el debugging. En producción deberías:
+     *   1. Loggear la excepción completa (con stack trace) en el servidor.
+     *   2. Retornar solo "Error interno del servidor" al cliente.
+     *   3. Opcionalmente retornar un código de error de soporte:
+     *      {"error": "Error interno", "errorCode": "ERR-20240115-001"}
+     *      para que el usuario pueda reportarlo sin exponer detalles.
+     *
+     * @param ex Excepción no manejada por handlers más específicos.
+     * @return ResponseEntity con HTTP 500 y mensaje genérico.
+     */
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, Object>> handleGenericException(
+            Exception ex) {
+        return buildResponse(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "Error interno del servidor: " + ex.getMessage()
+        );
+    }
+
+    /**
+     * Construye la estructura estándar de respuesta de error.
+     *
+     * Todas las respuestas de error del sistema tienen el mismo formato:
+     * {
+     *   "timestamp": "2024-01-15T10:30:00.123456",
+     *   "status":    401,
+     *   "error":     "Credenciales inválidas"
+     * }
+     *
+     * ¿Por qué incluir timestamp?
+     *   Facilita la correlación de errores en logs del servidor.
+     *   Si el usuario reporta un error a las 10:30, puedes buscar
+     *   exactamente en ese momento en los logs del servidor.
+     *
+     * ¿Por qué incluir status como número además del código HTTP?
+     *   Algunos clientes (especialmente móviles) no tienen acceso
+     *   fácil al código de estado HTTP de la respuesta. Incluirlo
+     *   en el body hace la respuesta más accesible.
+     *
+     * ¿Por qué Object como tipo del detail y no String?
+     *   Porque handleValidationErrors pasa un Map<String, String>
+     *   (múltiples errores por campo) mientras que los otros
+     *   handlers pasan un String. Object acepta ambos tipos
+     *   y Jackson los serializa correctamente en ambos casos.
+     *
+     * @param status código HTTP de la respuesta.
+     * @param detail detalle del error: String o Map<String, String>.
+     * @return ResponseEntity lista para retornar al cliente.
+     */
+    private ResponseEntity<Map<String, Object>> buildResponse(
+            HttpStatus status,
+            Object detail) {
+
+        Map<String, Object> body = new HashMap<>();
+        body.put("timestamp", LocalDateTime.now().toString());
+        body.put("status", status.value());
+        body.put("error", detail);
+
+        return ResponseEntity.status(status).body(body);
+    }
 }
