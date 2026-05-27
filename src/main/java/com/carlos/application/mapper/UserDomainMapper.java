@@ -2,6 +2,9 @@ package com.carlos.application.mapper;
 
 import com.carlos.domain.model.User;
 import com.carlos.infraestructure.adapter.output.persistence.UserEntity;
+import org.springframework.stereotype.Component;
+
+@Component
 
 /**
  * Mapper entre UserEntity (JPA/infraestructura) y User (dominio).

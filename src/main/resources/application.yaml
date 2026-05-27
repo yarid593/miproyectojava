@@ -40,7 +40,7 @@ spring:
     # Credenciales de conexión.
     # En producción: ${DB_USERNAME} y ${DB_PASSWORD} desde variables de entorno.
     username: root
-    password: root1312
+    password: 1234
 
     # Driver JDBC explícito.
     # Spring Boot lo detecta automáticamente desde el classpath,
