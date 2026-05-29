@@ -49,6 +49,7 @@ public class MiproyectoApplication {
 			System.out.println("═══════════════════════════════════════");
 			System.out.println("YaridP30 → " + encoder.encode("Pirateque2019"));
 			System.out.println("═══════════════════════════════════════");
+			
 		};
 	}
 }
